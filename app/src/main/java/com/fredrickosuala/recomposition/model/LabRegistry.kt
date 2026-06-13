@@ -1,9 +1,12 @@
 package com.fredrickosuala.recomposition.model
 
 import com.fredrickosuala.recomposition.labs.backwardswrite.BackwardsWriteLab
+import com.fredrickosuala.recomposition.labs.columnvslazycolumn.ColumnVsLazyColumnLab
 import com.fredrickosuala.recomposition.labs.derivedstateof.DerivedStateOfLab
 import com.fredrickosuala.recomposition.labs.deferredread.DeferredReadLab
 import com.fredrickosuala.recomposition.labs.drawphaseread.DrawPhaseReadLab
+import com.fredrickosuala.recomposition.labs.expensiveworkinlazy.ExpensiveWorkInLazyLab
+import com.fredrickosuala.recomposition.labs.lazylistkeys.LazyListKeysLab
 import com.fredrickosuala.recomposition.labs.oversubscription.OverSubscriptionLab
 import com.fredrickosuala.recomposition.labs.scopereduction.ScopeReductionLab
 import com.fredrickosuala.recomposition.labs.strongskipping.StrongSkippingLab
@@ -206,5 +209,82 @@ val allLabs: List<Lab> = listOf(
             "in event lambdas (onClick, onValueChange, LaunchedEffect, etc.) that run " +
             "outside the composition phase. One event → one state change → one recomposition.",
         content = { optimized -> BackwardsWriteLab(optimized) },
+    ),
+    Lab(
+        id = "lazy_list_keys",
+        title = "Lazy List Keys",
+        category = Category.Performance,
+        difficulty = Difficulty.Basic,
+        description = "A LazyColumn without item keys recomposes all displaced rows when " +
+            "one item moves to the top, even though only one item's position changed.",
+        problemStatement = "When items() is called without key = { it.id }, Compose uses " +
+            "positional identity: the composable at index 0 is always the 'same' composable. " +
+            "Moving a note from position 4 to position 0 means positions 0–4 all receive " +
+            "different NoteItem data → all five rows recompose, even though no note's content " +
+            "changed. The more items in the list, the more recompositions occur on each reorder.",
+        howToDetect = "Add a RecompositionCounter to each row. Move an item to the top " +
+            "and observe how many counters increment. Without keys, all shifted rows flash. " +
+            "The Layout Inspector recomposition overlay confirms the same pattern at a glance. " +
+            "Compose compiler metrics will not catch this — it is a runtime identity issue, " +
+            "not a stability issue.",
+        theFix = "Pass key = { it.id } to items(). Compose then matches each composable " +
+            "by item identity rather than position. Moving an item only relocates its existing " +
+            "composable — no data changed → zero recompositions. As a bonus, animateItem() " +
+            "becomes available, giving smooth reorder animations for free. " +
+            "Add contentType = { 'YourItemClass' } to group structurally identical items: " +
+            "when an item leaves the viewport, its slot can be reused by a newly-visible item " +
+            "of the same contentType, saving slot initialization — especially valuable for " +
+            "heterogeneous lists that mix item types (headers, rows, ads, etc.).",
+        content = { optimized -> LazyListKeysLab(optimized) },
+    ),
+    Lab(
+        id = "expensive_work_in_lazy",
+        title = "Expensive Work in Composition",
+        category = Category.Performance,
+        difficulty = Difficulty.Basic,
+        description = "Filter+sorting a large list directly in a composable body re-runs on " +
+            "every recomposition, even for unrelated state changes.",
+        problemStatement = "Any computation outside remember re-executes every time the " +
+            "composable body runs. For filter+sort over hundreds of items, this is measurably " +
+            "expensive. Worse, it re-runs for every unrelated state change (e.g. a button " +
+            "counter update), wasting CPU even when the query — the only input that should " +
+            "trigger a re-sort — hasn't changed.",
+        howToDetect = "Add a counter that increments inside the sort/filter operation. " +
+            "Press a button that changes unrelated state and watch the counter increment — " +
+            "the sort ran even though the query was unchanged. In production, attach Android " +
+            "Studio's CPU profiler and look for repeated filter/sort stack frames during " +
+            "UI interactions that have nothing to do with the list.",
+        theFix = "Wrap the computation in remember(key) { ... } where key is the input " +
+            "that, when changed, should trigger a re-sort (typically the query string). " +
+            "The block runs once on first composition and again only when the key changes; " +
+            "every other recomposition reuses the cached result. For production, go further: " +
+            "move the computation to the ViewModel with a background dispatcher, producing a " +
+            "StateFlow<List<T>> that Compose collects — keeping the main thread free entirely.",
+        content = { optimized -> ExpensiveWorkInLazyLab(optimized) },
+    ),
+    Lab(
+        id = "column_vs_lazy_column",
+        title = "Column vs LazyColumn",
+        category = Category.Performance,
+        difficulty = Difficulty.Basic,
+        description = "Column + verticalScroll eagerly composes every item upfront, " +
+            "consuming memory and main-thread budget regardless of how many items are visible.",
+        problemStatement = "Column is not lazy: adding Modifier.verticalScroll() makes the " +
+            "list scrollable, but ALL items are composed immediately on first render and " +
+            "remain in composition forever — even items hundreds of pixels off-screen. " +
+            "For a 100-item list this is a noticeable initial composition spike; for 1000+ " +
+            "items it causes jank, high memory pressure, and makes every subsequent " +
+            "recomposition expensive because all items recompose, not just visible ones.",
+        howToDetect = "Place a RecompositionCounter in each row. Press 'Recompose' and " +
+            "count how many counters increment — all 100 in the naive case, only the " +
+            "visible ~10 in the optimized case. The JankMeter spinner stutters on the " +
+            "initial render of the naive variant (100 composables initialising at once). " +
+            "Layout Inspector's 'Show Recomposition Count' overlay confirms the difference.",
+        theFix = "Replace Column + verticalScroll with LazyColumn (or LazyRow / " +
+            "LazyVerticalGrid for grids). LazyColumn only composes items that are at or " +
+            "near the viewport. Off-screen items are decomposed and their resources are " +
+            "freed; they recompose only when scrolled back into view. Rule of thumb: " +
+            "if the item count can grow unbounded or exceeds ~20 items, use a lazy layout.",
+        content = { optimized -> ColumnVsLazyColumnLab(optimized) },
     ),
 )
