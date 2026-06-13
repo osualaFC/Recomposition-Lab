@@ -5,13 +5,18 @@ import com.fredrickosuala.recomposition.labs.columnvslazycolumn.ColumnVsLazyColu
 import com.fredrickosuala.recomposition.labs.derivedstateof.DerivedStateOfLab
 import com.fredrickosuala.recomposition.labs.deferredread.DeferredReadLab
 import com.fredrickosuala.recomposition.labs.drawphaseread.DrawPhaseReadLab
+import com.fredrickosuala.recomposition.labs.effectkeys.EffectKeysLab
 import com.fredrickosuala.recomposition.labs.expensiveworkinlazy.ExpensiveWorkInLazyLab
+import com.fredrickosuala.recomposition.labs.heavymainthread.HeavyMainThreadLab
+import com.fredrickosuala.recomposition.labs.imageloading.ImageLoadingLab
 import com.fredrickosuala.recomposition.labs.lazylistkeys.LazyListKeysLab
+import com.fredrickosuala.recomposition.labs.overdraw.OverdrawLab
 import com.fredrickosuala.recomposition.labs.oversubscription.OverSubscriptionLab
 import com.fredrickosuala.recomposition.labs.scopereduction.ScopeReductionLab
 import com.fredrickosuala.recomposition.labs.strongskipping.StrongSkippingLab
 import com.fredrickosuala.recomposition.labs.unstableclass.UnstableClassLab
 import com.fredrickosuala.recomposition.labs.unstablecollections.UnstableCollectionsLab
+import com.fredrickosuala.recomposition.labs.viewmodelstate.ViewModelStateLab
 
 val allLabs: List<Lab> = listOf(
     Lab(
@@ -286,5 +291,142 @@ val allLabs: List<Lab> = listOf(
             "freed; they recompose only when scrolled back into view. Rule of thumb: " +
             "if the item count can grow unbounded or exceeds ~20 items, use a lazy layout.",
         content = { optimized -> ColumnVsLazyColumnLab(optimized) },
+    ),
+    Lab(
+        id = "heavy_main_thread",
+        title = "Heavy Work on the Main Thread",
+        category = Category.Performance,
+        difficulty = Difficulty.Intermediate,
+        description = "Expensive CPU work called without a dispatcher switch runs on the " +
+            "main thread, blocking frame delivery and making the JankMeter stutter.",
+        problemStatement = "LaunchedEffect runs on the main thread by default. Any suspend " +
+            "function called inside it that does CPU-bound work — sorting, parsing, heavy " +
+            "computation — without switching to Dispatchers.Default will execute on the main " +
+            "thread. The main thread is the same thread Choreographer uses to deliver frames. " +
+            "Blocking it for even 16 ms drops a frame; 200+ ms causes visible jank.",
+        howToDetect = "Place a JankMeter (a continuously-spinning arc driven by Vsync) next " +
+            "to the triggering action. If the spinner stutters or freezes when the operation " +
+            "runs, the main thread is blocked. For production: Android Studio's CPU Profiler " +
+            "→ 'Main thread wall clock time' shows blocking intervals. Systrace and Perfetto " +
+            "both show main-thread slices exceeding 16 ms as frame drops.",
+        theFix = "Hoist the computation into a ViewModel and wrap it with " +
+            "withContext(Dispatchers.Default). The ViewModel's viewModelScope ensures the " +
+            "coroutine is cancelled when the composable leaves the screen. Expose the result " +
+            "as StateFlow<UiState> and collect it with collectAsStateWithLifecycle() — the " +
+            "composable observes state changes and shows a loading indicator while work runs, " +
+            "keeping the main thread free to render every frame.",
+        content = { optimized -> HeavyMainThreadLab(optimized) },
+    ),
+    Lab(
+        id = "effect_keys",
+        title = "Effect Keys / Restarting Effects",
+        category = Category.Recomposition,
+        difficulty = Difficulty.Intermediate,
+        description = "A LaunchedEffect with an unstable key (a new object on every " +
+            "recomposition) restarts the effect on every recompose, cancelling any " +
+            "in-flight work.",
+        problemStatement = "LaunchedEffect compares its key with the previous key using " +
+            "equals(). A plain class (no data modifier) uses reference equality: every new " +
+            "instance is 'different', even with identical field values. Constructing such a " +
+            "class in the composable body — without remember — means every recomposition " +
+            "creates a fresh object. LaunchedEffect sees a new key → cancels the current " +
+            "coroutine → launches a new one. Any in-flight network request, animation, or " +
+            "timer is silently restarted.",
+        howToDetect = "Add a restart counter inside the LaunchedEffect block and display it " +
+            "in the UI. If the counter increments when an unrelated state change causes a " +
+            "parent recomposition, the key is unstable. In production, unexpected duplicate " +
+            "network requests or re-running animations are common symptoms. Logging inside " +
+            "the LaunchedEffect with the coroutine job ID will confirm repeated launches.",
+        theFix = "Key the effect on the smallest, stable value that — when it genuinely " +
+            "changes — should restart the effect. For a user feed, that is the userId String, " +
+            "not a config object that wraps it. Prefer primitive types, Strings, and stable " +
+            "data classes (with proper equals/hashCode) as keys. If an object must be the " +
+            "key, either remember it or use a data class so equals() is structural.",
+        content = { optimized -> EffectKeysLab(optimized) },
+    ),
+    Lab(
+        id = "viewmodel_state",
+        title = "ViewModel State Exposure",
+        category = Category.Recomposition,
+        difficulty = Difficulty.Intermediate,
+        description = "Exposing List<T> from a ViewModel makes receiving composables " +
+            "unstable and unskippable. Wrapping state in a @Stable UiState with " +
+            "ImmutableList<T> restores skippability.",
+        problemStatement = "StateFlow<List<T>> is a common ViewModel pattern, but " +
+            "List<T> is an unstable JVM interface. The Compose compiler cannot guarantee " +
+            "its contents haven't changed between recompositions, so any composable that " +
+            "accepts List<T> is inferred as unstable and unskippable. Every parent " +
+            "recomposition — including ones driven by completely unrelated state — forces " +
+            "the child to recompose, even when the list is identical.",
+        howToDetect = "Add a RecompositionCounter to the child that displays the list. " +
+            "Change unrelated state in the parent (the 'Poke' button) and watch the counter. " +
+            "If it increments, the child is unskippable. Compose compiler metrics " +
+            "(./gradlew assembleDebug -Pcompose.metrics=true) will report the composable's " +
+            "parameter types as 'unstable', confirming the root cause.",
+        theFix = "Model the ViewModel's output as a data class (e.g. ItemsUiState) whose " +
+            "fields use stable types. Replace List<T> with ImmutableList<T> from " +
+            "kotlinx-collections-immutable — it is annotated @Immutable, making composables " +
+            "that receive it skippable. Expose the data class via StateFlow<ItemsUiState> " +
+            "and collect with collectAsStateWithLifecycle(). The RecompositionCounter now " +
+            "stays flat when 'Poke' is pressed; it only increments when the list actually " +
+            "changes.",
+        content = { optimized -> ViewModelStateLab(optimized) },
+    ),
+    Lab(
+        id = "overdraw",
+        title = "Overdraw",
+        category = Category.Performance,
+        difficulty = Difficulty.Basic,
+        description = "Stacking multiple opaque backgrounds causes the GPU to redraw the " +
+            "same pixels multiple times per frame — wasted fill-rate with no visual benefit.",
+        problemStatement = "Every Modifier.background() call instructs the GPU to fill that " +
+            "region with a color. When an opaque background is placed inside another opaque " +
+            "background, the outer layer is completely occluded — yet the GPU still renders " +
+            "it. On modern hardware this is rarely the sole bottleneck, but it compounds " +
+            "with other work: each overdraw layer consumes fill-rate budget, heats the GPU, " +
+            "and can contribute to frame drops on low-end devices or in complex layouts.",
+        howToDetect = "Enable 'Debug GPU Overdraw' in Developer Options → Show overdraw areas. " +
+            "Colors indicate how many times each pixel was drawn: true color = 1× (ideal), " +
+            "blue = 2×, green = 3×, pink = 4×, red = 5×+. Red regions are severe and should " +
+            "be fixed. Also inspect the View hierarchy or Compose Layout Inspector — any " +
+            "node with a background whose parent already has an opaque background of the same " +
+            "color is a candidate for removal.",
+        theFix = "Flatten nested backgrounds to a single Modifier.background() on the " +
+            "outermost container. Remove any window or theme background that is already " +
+            "covered by an opaque Scaffold or Surface. In Compose, each recompose scope " +
+            "should own at most one background; pass the desired color inward rather than " +
+            "re-applying it at every level.",
+        content = { optimized -> OverdrawLab(optimized) },
+    ),
+    Lab(
+        id = "image_loading",
+        title = "Image Loading",
+        category = Category.Performance,
+        difficulty = Difficulty.Basic,
+        description = "Loading large images without a size constraint or placeholder causes " +
+            "excessive memory use and abrupt pop-in. Coil can sample down to the display " +
+            "size during decode — reducing memory 5× or more.",
+        problemStatement = "A raw URL passed to AsyncImage with no ImageRequest " +
+            "customization gives Coil no explicit decode-size target. If the measured layout " +
+            "size is imprecise (common in lazy grids during the first pass), Coil may decode " +
+            "the full-resolution source — e.g. 800×800 px — even for a 120 dp display slot " +
+            "on a 3× screen (which only needs 360×360 px). Holding 10× more pixels than " +
+            "needed multiplies heap usage across all grid items, increasing GC pressure and " +
+            "causing stutters during fast scrolling. Additionally, no placeholder means grid " +
+            "cells are blank during loading; no crossfade makes images pop in abruptly.",
+        howToDetect = "Open Android Studio's Memory Profiler and compare heap snapshots " +
+            "between the naive and optimized variants while scrolling. Look for " +
+            "android.graphics.Bitmap allocations — the naive variant will show significantly " +
+            "larger bitmaps per image. The JankMeter may stutter on memory-constrained " +
+            "devices when the GC runs to reclaim oversized bitmaps.",
+        theFix = "Create an ImageRequest with crossfade(true) for smooth transitions and " +
+            "supply a placeholder Painter so cells are never blank. Apply ContentScale.Crop " +
+            "so the image fills its bounded slot correctly. Coil reads the composable's " +
+            "measured layout size from the Modifier chain to determine the down-sample target " +
+            "during BitmapFactory decode — ensure the AsyncImage has explicit size modifiers " +
+            "(fillMaxWidth + aspectRatio, or an explicit size()) so Coil always has an " +
+            "accurate target. For very large source images, set .size() on the request " +
+            "builder explicitly as a hard upper bound.",
+        content = { optimized -> ImageLoadingLab(optimized) },
     ),
 )
